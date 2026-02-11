@@ -51,15 +51,15 @@ pub enum Stmt {
 
 #[derive(Debug, Clone)]
 pub enum Expr {
-    Int(i64),
+    Num(f64),
     Bool(bool),
     Str(String),
     VecLit(Vec<Expr>),
     Ident(String),
 
     // Borrowing / indexing
-    Borrow { mut_: bool, expr: Box<Expr> }, // &x, &mut x, &xs[i], &mut xs[i]
-    Index { base: Box<Expr>, index: Box<Expr> }, // xs[i], (&mut xs)[i]
+    Borrow { mut_: bool, expr: Box<Expr> },
+    Index { base: Box<Expr>, index: Box<Expr> },
 
     // Arithmetic
     Add { left: Box<Expr>, right: Box<Expr> },

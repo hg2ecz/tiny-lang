@@ -15,7 +15,7 @@ pub enum Token {
 
     // Ident + literals
     Ident(String),
-    Int(i64),
+    Num(f64),
     Str(String),
 
     // Operators / punct
