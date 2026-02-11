@@ -47,7 +47,10 @@ struct Slot {
 #[derive(Debug, Default)]
 struct Env {
     scopes: Vec<HashMap<String, Slot>>,
-    borrow_log: Vec<Vec<(RefTarget, Mutability)>>, // per-scope release list
+    borrow_log: Vec<Vec<(RefTarget, Mutability)>>, // released on pop_scope
+
+    // NEW: temporary borrows, released at end of statement (print/exprstmt)
+    temp_borrow_log: Vec<Vec<(RefTarget, Mutability)>>,
 }
 
 impl Env {
@@ -70,6 +73,43 @@ impl Env {
         self.scopes.pop();
         Ok(())
     }
+
+    // ---- temporary borrow frames ----
+
+    fn push_temp_frame(&mut self) {
+        self.temp_borrow_log.push(Vec::new());
+    }
+
+    fn pop_temp_frame_release(&mut self) -> Result<(), LangError> {
+        let log = self
+            .temp_borrow_log
+            .pop()
+            .expect("temp borrow frame underflow");
+        for (tgt, mutability) in log.into_iter().rev() {
+            self.release_borrow(&tgt, mutability)?;
+        }
+        Ok(())
+    }
+
+    fn record_borrow(&mut self, target: RefTarget, mutability: Mutability) {
+        if let Some(frame) = self.temp_borrow_log.last_mut() {
+            frame.push((target, mutability));
+        } else {
+            self.borrow_log.last_mut().unwrap().push((target, mutability));
+        }
+    }
+
+    fn replace_last_record_with(&mut self, target: RefTarget, mutability: Mutability) {
+        if let Some(frame) = self.temp_borrow_log.last_mut() {
+            frame.pop();
+            frame.push((target, mutability));
+        } else {
+            self.borrow_log.last_mut().unwrap().pop();
+            self.borrow_log.last_mut().unwrap().push((target, mutability));
+        }
+    }
+
+    // ---- vars ----
 
     fn define(&mut self, name: String, v: Value) {
         self.scopes.last_mut().unwrap().insert(
@@ -115,6 +155,8 @@ impl Env {
         Ok(())
     }
 
+    // ---- borrowing ----
+
     fn acquire_borrow(&mut self, var: &str, mutability: Mutability) -> Result<(), LangError> {
         let slot = self
             .lookup_slot_mut(var)
@@ -148,10 +190,8 @@ impl Env {
             }
         }
 
-        self.borrow_log
-            .last_mut()
-            .unwrap()
-            .push((RefTarget::Var(var.to_string()), mutability));
+        // record in temp frame if active, otherwise scope log
+        self.record_borrow(RefTarget::Var(var.to_string()), mutability);
         Ok(())
     }
 
@@ -217,6 +257,7 @@ impl Interpreter {
     }
 
     pub fn run(&mut self, p: Program) -> Result<(), LangError> {
+        // collect functions
         for it in &p.items {
             if let Item::Fn(f) = it {
                 if self.fns.contains_key(&f.name) {
@@ -229,6 +270,7 @@ impl Interpreter {
             }
         }
 
+        // execute top-level statements
         for it in p.items {
             if let Item::Stmt(s) = it {
                 let c = self.exec_stmt(s)?;
@@ -258,22 +300,40 @@ impl Interpreter {
     fn exec_stmt(&mut self, s: Stmt) -> Result<Control, LangError> {
         match s {
             Stmt::Let { name, expr } => {
+                // DO NOT use temp frame here: if expr is a reference, it must stay alive.
                 let v = self.eval_expr(expr)?;
                 self.env.define(name, v);
                 Ok(Control::None)
             }
             Stmt::Assign { name, expr } => {
+                // DO NOT use temp frame here for the same reason.
                 let v = self.eval_expr(expr)?;
                 self.env.assign(&name, v)?;
                 Ok(Control::None)
             }
             Stmt::Print { expr } => {
-                let v = self.eval_expr(expr)?;
-                println!("{}", self.format_value(&v)?);
+                // Temporary borrows created inside this statement are released at statement end.
+                self.env.push_temp_frame();
+                let res: Result<(), LangError> = (|| {
+                    let v = self.eval_expr(expr)?;
+                    println!("{}", self.format_value(&v)?);
+                    Ok(())
+                })();
+                let pop_res = self.env.pop_temp_frame_release();
+                res?;
+                pop_res?;
                 Ok(Control::None)
             }
             Stmt::ExprStmt { expr } => {
-                let _ = self.eval_expr(expr)?;
+                // Same statement-level temp-borrow behavior.
+                self.env.push_temp_frame();
+                let res: Result<(), LangError> = (|| {
+                    let _ = self.eval_expr(expr)?;
+                    Ok(())
+                })();
+                let pop_res = self.env.pop_temp_frame_release();
+                res?;
+                pop_res?;
                 Ok(Control::None)
             }
             Stmt::Return(e) => {
@@ -286,9 +346,9 @@ impl Interpreter {
                 else_body,
             } => {
                 let cond_v = self.eval_expr(cond)?;
-                let resolved = self.resolve_value_for_read(&cond_v)?;
-                let take_then = match resolved {
-                    Value::Bool(b) => b,
+                let cond_r = self.resolve_value_for_read(&cond_v)?;
+                let b = match cond_r {
+                    Value::Bool(x) => x,
                     _ => {
                         return Err(LangError::Runtime(
                             "if condition must be Bool (true/false)".into(),
@@ -296,13 +356,14 @@ impl Interpreter {
                     }
                 };
 
-                if take_then {
+                if b {
                     self.exec_block(&then_body)
                 } else {
                     self.exec_block(&else_body)
                 }
             }
             Stmt::For { var, iter, body } => {
+                // iter must evaluate to Vec (owned, moved)
                 let v = self.eval_expr(iter)?;
                 let elems = match v {
                     Value::Vec(xs) => xs,
@@ -337,6 +398,7 @@ impl Interpreter {
             Expr::Int(n) => Ok(Value::Int(n)),
             Expr::Bool(b) => Ok(Value::Bool(b)),
             Expr::Str(s) => Ok(Value::Str(s)),
+
             Expr::VecLit(items) => {
                 let mut out = Vec::with_capacity(items.len());
                 for it in items {
@@ -344,6 +406,7 @@ impl Interpreter {
                 }
                 Ok(Value::Vec(out))
             }
+
             Expr::Ident(name) => self.read_var_move(&name),
 
             Expr::Neg { expr } => {
@@ -506,13 +569,8 @@ impl Interpreter {
         self.env.acquire_borrow(&owning_var, want)?;
 
         if let RefTarget::VecElem { .. } = &target {
-            // replace Var(...) in log with VecElem(...)
-            self.env.borrow_log.last_mut().unwrap().pop();
-            self.env
-                .borrow_log
-                .last_mut()
-                .unwrap()
-                .push((target.clone(), want));
+            // replace Var(...) record with VecElem(...) in active log (temp or scope)
+            self.env.replace_last_record_with(target.clone(), want);
         }
 
         Ok(Value::Ref(target, want))
@@ -521,6 +579,7 @@ impl Interpreter {
     fn lvalue_target(&mut self, e: Expr, want: Mutability) -> Result<RefTarget, LangError> {
         match e {
             Expr::Ident(name) => Ok(RefTarget::Var(name)),
+
             Expr::Index { base, index } => {
                 let (var, base_mut) = self.base_as_var_or_ref(*base)?;
                 if want == Mutability::Mut && base_mut != Mutability::Mut {
@@ -559,6 +618,7 @@ impl Interpreter {
 
                 Ok(RefTarget::VecElem { var, index: idx })
             }
+
             _ => Err(LangError::Runtime(
                 "Borrow target must be a variable or index (xs[i])".into(),
             )),
@@ -620,15 +680,16 @@ impl Interpreter {
                 Mutability::Mut,
             ))
         } else {
+            // immut element ref borrows the base vector immutably
             self.env.acquire_borrow(&var, Mutability::Imm)?;
-            self.env.borrow_log.last_mut().unwrap().pop();
-            self.env.borrow_log.last_mut().unwrap().push((
+            self.env.replace_last_record_with(
                 RefTarget::VecElem {
                     var: var.clone(),
                     index: idx,
                 },
                 Mutability::Imm,
-            ));
+            );
+
             Ok(Value::Ref(
                 RefTarget::VecElem { var, index: idx },
                 Mutability::Imm,
@@ -740,9 +801,7 @@ impl Interpreter {
                 xs[idx] = v;
                 Ok(Value::Unit)
             }
-            _ => Err(LangError::Runtime(
-                "set target base must be a vector".into(),
-            )),
+            _ => Err(LangError::Runtime("set target base must be a vector".into())),
         }
     }
 

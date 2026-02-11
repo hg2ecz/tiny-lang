@@ -12,3 +12,6 @@ print "Before calling consume():";
 print &numbers;
 
 consume(numbers);
+
+print "FYI: here is an error, because 'numbers' is not owned.";
+print &numbers;
