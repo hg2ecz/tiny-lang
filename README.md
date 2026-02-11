@@ -1,4 +1,4 @@
-# Mini Script Language (Rust Interpreter)
+# Mini Script Language
 
 A tiny interpreted scripting language implemented in Rust.  
 It’s intentionally small, but expressive enough for classic exercises like Fibonacci, prime search, and simple vector-based algorithms.
