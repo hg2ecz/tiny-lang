@@ -1,11 +1,12 @@
 mod ast;
+mod env;
 mod error;
 mod interpreter;
 mod lexer;
 mod parser;
 mod token;
+mod value;
 
-use std::env;
 use std::fs;
 
 use interpreter::Interpreter;
@@ -13,7 +14,7 @@ use parser::Parser;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // argv[1] = script file
-    let mut args = env::args();
+    let mut args = std::env::args();
     let prog_name = args.next().unwrap(); // argv[0]
 
     let filename = match args.next() {

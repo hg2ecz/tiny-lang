@@ -420,10 +420,10 @@ impl<'a> Parser<'a> {
 
     fn parse_primary(&mut self) -> Result<Expr, LangError> {
         match &self.cur {
-            Token::Int(n) => {
+            Token::Num(n) => {
                 let v = *n;
                 self.bump()?;
-                Ok(Expr::Int(v))
+                Ok(Expr::Num(v))
             }
             Token::Str(s) => {
                 let v = s.clone();

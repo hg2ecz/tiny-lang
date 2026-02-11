@@ -7,9 +7,9 @@ pub struct Lexer<'a> {
 }
 
 impl<'a> Lexer<'a> {
-    pub fn new(input: &'a str) -> Self {
+    pub fn new(s: &'a str) -> Self {
         Self {
-            input: input.as_bytes(),
+            input: s.as_bytes(),
             i: 0,
         }
     }
@@ -19,18 +19,18 @@ impl<'a> Lexer<'a> {
     }
 
     fn bump(&mut self) -> Option<u8> {
-        let b = self.peek()?;
+        let c = self.peek()?;
         self.i += 1;
-        Some(b)
+        Some(c)
     }
 
     fn skip_ws_and_comments(&mut self) {
         loop {
-            while matches!(self.peek(), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+            while matches!(self.peek(), Some(b' ' | b'\t' | b'\r' | b'\n')) {
                 self.i += 1;
             }
             // line comment: //
-            if self.peek() == Some(b'/') && self.input.get(self.i + 1) == Some(&b'/') {
+            if self.peek() == Some(b'/') && self.input.get(self.i + 1).copied() == Some(b'/') {
                 while let Some(c) = self.peek() {
                     self.i += 1;
                     if c == b'\n' {
@@ -45,7 +45,6 @@ impl<'a> Lexer<'a> {
 
     pub fn next_token(&mut self) -> Result<Token, LangError> {
         self.skip_ws_and_comments();
-
         let c = match self.peek() {
             Some(c) => c,
             None => return Ok(Token::Eof),
@@ -101,7 +100,6 @@ impl<'a> Lexer<'a> {
                 Ok(Token::Star)
             }
             b'/' => {
-                // comments are already skipped; so this is division token
                 self.bump();
                 Ok(Token::Slash)
             }
@@ -109,6 +107,7 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 Ok(Token::Percent)
             }
+
             b'=' => {
                 self.bump();
                 if self.peek() == Some(b'=') {
@@ -145,24 +144,47 @@ impl<'a> Lexer<'a> {
                     Ok(Token::Gt)
                 }
             }
+
             b'"' => self.lex_string(),
-            b'0'..=b'9' => self.lex_int(),
+            b'0'..=b'9' => self.lex_number(),
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.lex_ident_or_kw(),
             _ => Err(LangError::Lex(format!("Unexpected char: {}", c as char))),
         }
     }
 
-    fn lex_int(&mut self) -> Result<Token, LangError> {
+    fn lex_number(&mut self) -> Result<Token, LangError> {
         let start = self.i;
+
+        // integer part
         while matches!(self.peek(), Some(b'0'..=b'9')) {
             self.i += 1;
         }
+
+        // fractional part
+        if self.peek() == Some(b'.') {
+            self.i += 1;
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.i += 1;
+            }
+        }
+
+        // exponent part
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.i += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.i += 1;
+            }
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.i += 1;
+            }
+        }
+
         let s = std::str::from_utf8(&self.input[start..self.i])
             .map_err(|e| LangError::Lex(e.to_string()))?;
         let n = s
-            .parse::<i64>()
+            .parse::<f64>()
             .map_err(|e| LangError::Lex(e.to_string()))?;
-        Ok(Token::Int(n))
+        Ok(Token::Num(n))
     }
 
     fn lex_ident_or_kw(&mut self) -> Result<Token, LangError> {
